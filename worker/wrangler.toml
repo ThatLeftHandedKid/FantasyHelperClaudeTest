@@ -1,0 +1,7 @@
+name = "fantasy-hub-proxy"
+main = "index.js"
+compatibility_date = "2024-09-01"
+
+[vars]
+# Your GitHub Pages origin: scheme + host only, no path, no trailing slash
+ALLOWED_ORIGIN = "https://YOUR-USERNAME.github.io"
