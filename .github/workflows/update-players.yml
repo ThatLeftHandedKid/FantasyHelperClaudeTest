@@ -1,4 +1,4 @@
-name: Update players
+name: Update players and projections
 on:
   schedule:
     - cron: '0 11 * * *'
@@ -23,9 +23,31 @@ jobs:
           out.sort((a, b) => a.n.localeCompare(b.n));
           require('fs').writeFileSync('players.json', JSON.stringify(out));
           EOF
+      - name: Build projections.json from Sleeper
+        run: |
+          node <<'EOF'
+          (async () => {
+            const get = async u => { const r = await fetch(u); if (!r.ok) throw new Error(u + ' ' + r.status); return r.json(); };
+            const st = await get('https://api.sleeper.app/v1/state/nfl');
+            const season = st.season, week = st.week || 1, raw = require('./raw.json'), rows = [];
+            for (const pos of ['QB','RB','WR','TE','K','DEF']) {
+              let list;
+              try { list = await get(`https://api.sleeper.app/projections/nfl/${season}/${week}?season_type=regular&position[]=${pos}`); }
+              catch (e) { console.log('skipped ' + pos + ': ' + e.message); continue; }
+              for (const r of list) {
+                const s = r.stats || {}, p = raw[r.player_id] || {};
+                const n = p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim();
+                if (!n || (s.pts_ppr == null && s.pts_std == null)) continue;
+                rows.push({ n, pos, std: s.pts_std ?? null, half: s.pts_half_ppr ?? null, ppr: s.pts_ppr ?? null });
+              }
+            }
+            console.log('projection rows: ' + rows.length);
+            require('fs').writeFileSync('projections.json', JSON.stringify({ season, week, updated: new Date().toISOString(), rows }));
+          })();
+          EOF
       - name: Commit if changed
         run: |
           git config user.name "github-actions"
           git config user.email "actions@users.noreply.github.com"
-          git add players.json
-          git diff --cached --quiet || (git commit -m "Update players" && git push)
+          git add players.json projections.json
+          git diff --cached --quiet || (git commit -m "Update players and projections" && git push)
