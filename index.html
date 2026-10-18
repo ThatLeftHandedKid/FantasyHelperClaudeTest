@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fantasy Hub</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--paper:#eef0ea;--ink:#1b2420;--turf:#2f6b3a;--flag:#e8b923;--red:#c8412d;--line:#c9cfc3;--card:#fafbf7}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 Barlow,system-ui,sans-serif}
+header{background:var(--turf);color:#fff;padding:14px 20px;display:flex;flex-wrap:wrap;gap:12px 24px;align-items:center}
+h1{font:700 28px/1 "Barlow Condensed",Impact,sans-serif;margin:0;letter-spacing:.5px}
+h2{font:600 22px "Barlow Condensed",Impact,sans-serif;margin:0 0 10px}
+select,input,button{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:4px;background:#fff;color:var(--ink)}
+button{cursor:pointer;background:var(--ink);color:#fff;border-color:var(--ink)}
+button.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
+:focus-visible{outline:3px solid var(--flag);outline-offset:2px}
+nav{display:flex;gap:4px;padding:10px 20px 0;border-bottom:2px solid var(--ink);flex-wrap:wrap}
+nav button{background:transparent;color:var(--ink);border:0;border-radius:4px 4px 0 0;font:600 18px "Barlow Condensed",sans-serif}
+nav button[aria-selected=true]{background:var(--ink);color:#fff}
+main{max-width:920px;margin:0 auto;padding:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:16px;margin-bottom:16px}
+.row{display:grid;grid-template-columns:60px 1fr auto;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);align-items:center}
+.row:last-child{border:0}
+.pos{font:700 18px "Barlow Condensed",sans-serif;color:var(--turf)}
+.muted{color:#5d675f;font-size:14px}
+.risk{color:var(--red);font-weight:500}
+.form{display:flex;flex-wrap:wrap;gap:8px}
+.form input[name=proj]{flex:1 1 260px}
+.verdict{font:700 26px "Barlow Condensed",sans-serif}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:600px){.cols{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Fantasy Hub</h1>
+  <label>League <select id="lg"></select></label>
+  <button class="ghost" style="color:#fff;border-color:#fff" id="newlg">New league</button>
+</header>
+<nav role="tablist" id="tabs"></nav>
+<main id="view"></main>
+<script>
+const KEY='fantasyhub.v1', $=s=>document.querySelector(s);
+const mk=name=>({name,ppr:1,slots:{QB:1,RB:2,WR:2,TE:1,FLEX:1},players:[]});
+let S;
+try{S=JSON.parse(localStorage.getItem(KEY))}catch{}
+S=S||{active:0,tab:'Lineup',weights:{ESPN:1,Sleeper:1,Custom:1},leagues:[mk('My league')]};
+const L=()=>S.leagues[S.active];
+const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(S))}catch{}};
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const POS=['QB','RB','WR','TE','K','DEF'], TABS=['Lineup','Players','Trade','Waivers','Find trades','Accuracy','Settings'];
+
+// Consensus engine: weighted mean of sources, dropping any that stray >35% from the median (needs 3+ sources)
+function blend(p){
+  const e=Object.entries(p.proj||{}).filter(([,v])=>isFinite(v));
+  if(!e.length)return null;
+  const vals=e.map(x=>x[1]).sort((a,b)=>a-b), med=vals[vals.length>>1];
+  let keep=e.length>=3?e.filter(([,v])=>Math.abs(v-med)<=.35*med):e;
+  if(!keep.length)keep=e;
+  let w=0,t=0;
+  keep.forEach(([k,v])=>{const x=S.weights[k]??1;w+=x;t+=x*v});
+  return{m:t/w,lo:vals[0],hi:vals[vals.length-1],n:e.length};
+}
+const risky=b=>b.n>1&&(b.hi-b.lo)/b.m>.3;
+const val=p=>isFinite(p.val)&&p.val!==''&&p.val!==null?+p.val:(blend(p)?blend(p).m*10:0);
+
+function lineup(add=[],rm=[]){
+  const mine=L().players.filter(p=>((p.mine&&!rm.includes(p))||add.includes(p))&&blend(p)).sort((a,b)=>blend(b).m-blend(a).m);
+  const used=new Set(), out=[];
+  for(const [pos,n] of Object.entries(L().slots)){
+    for(let i=0;i<n;i++){
+      const p=mine.find(p=>!used.has(p)&&(pos==='FLEX'?['RB','WR','TE'].includes(p.pos):p.pos===pos));
+      out.push([pos,p]); if(p)used.add(p);
+    }
+  }
+  return{out,bench:mine.filter(p=>!used.has(p))};
+}
+const line=(pos,p)=>{
+  const b=p&&blend(p);
+  return `<div class="row"><span class="pos">${pos}</span><span>${p?esc(p.name)+' <span class="muted">'+p.pos+'</span>':'<span class="muted">Empty slot: add a player on the Players tab</span>'}</span><span>${b?b.m.toFixed(1)+(risky(b)?' <span class="risk">sources disagree ('+b.lo+'–'+b.hi+')</span>':''):''}</span></div>`;
+};
+
+const views={
+  Lineup(){
+    const {out,bench}=lineup(), tot=out.reduce((s,[,p])=>s+(p?blend(p).m:0),0);
+    return `<div class="card"><h2>Start these players</h2>${out.map(([a,p])=>line(a,p)).join('')}<p><b>Projected total: ${tot.toFixed(1)}</b></p></div>
+    <div class="card"><h2>Bench</h2>${bench.map(p=>line(p.pos,p)).join('')||'<p class="muted">No bench players yet.</p>'}</div>`;
+  },
+  Players(){
+    return `<div class="card"><h2>Add a player</h2><form class="form" id="add">
+      <input name="name" placeholder="Player name" list="pdb" autocomplete="off" required><datalist id="pdb">${DB.map(x=>`<option value="${esc(x.n)}">${x.pos} · ${x.tm}</option>`).join('')}</datalist>
+      <select name="pos">${POS.map(x=>`<option>${x}</option>`).join('')}</select>
+      <input name="proj" placeholder="Projections, e.g. ESPN:14.2, Sleeper:12.8">
+      <input name="val" type="number" step="any" placeholder="Trade value (optional)" style="width:190px">
+      <select name="where"><option value="mine">My team</option><option value="other">Another team</option><option value="fa">Free agent</option></select>
+      <button>Add player</button></form>
+      <p class="muted">Projections are points in this league's scoring. Source names with a weight in Settings are blended; any other name counts as weight 1.</p><p class="muted">${DB.length?DB.length+' players loaded for autocomplete.':window._dbErr?'<span class="risk">Could not load the player list: '+esc(window._dbErr)+'</span>':'Loading player list…'} <button type="button" class="ghost" id="refdb">Refresh player list</button></p></div>
+    <div class="card"><h2>Players (${L().players.length})</h2>${L().players.map((p,i)=>{const b=blend(p);
+      return `<div class="row"><span class="pos">${p.pos}</span><span>${esc(p.name)} <span class="muted">${p.tm?p.tm+' · ':''}${p.mine?'my team':p.fa?'free agent':'other team'}${b?' · blended '+b.m.toFixed(1)+' from '+b.n+' source'+(b.n>1?'s':''):''}</span></span><button class="ghost" data-del="${i}">Remove</button></div>`}).join('')||'<p class="muted">Nothing here yet.</p>'}</div>`;
+  },
+  Trade(){
+    return `<div class="card"><h2>Trade calculator</h2><div class="cols">
+      <label>You give<input id="give" list="names" style="width:100%" placeholder="Names, separated by commas"></label>
+      <label>You get<input id="get" list="names" style="width:100%" placeholder="Names, separated by commas"></label></div>
+      <datalist id="names">${L().players.map(p=>`<option value="${esc(p.name)}">`).join('')}</datalist>
+      <p id="tres" class="muted">Enter players on both sides.</p></div>`;
+  },
+  Waivers(){
+    const base=tot(lineup()), r=L().players.filter(p=>p.fa&&blend(p)).map(p=>({p,g:tot(lineup([p]))-base})).filter(x=>x.g>.1).sort((a,b)=>b.g-a.g).slice(0,10);
+    return `<div class="card"><h2>Waiver pickups</h2>${r.map(x=>`<div class="row"><span class="pos">${x.p.pos}</span><span>${esc(x.p.name)} <span class="muted">blended ${blend(x.p).m.toFixed(1)}</span></span><b>+${x.g.toFixed(1)} pts/week</b></div>`).join('')||'<p class="muted">No pickups would improve your lineup. Add free agents on the Players tab (choose Free agent).</p>'}</div>`;
+  },
+  'Find trades'(){
+    const P=L().players, mine=P.filter(p=>p.mine&&blend(p)), others=P.filter(p=>!p.mine&&!p.fa&&blend(p)), base=tot(lineup()), gives=mine.map(p=>[p]), res=[];
+    for(let i=0;i<mine.length;i++)for(let j=i+1;j<mine.length;j++)gives.push([mine[i],mine[j]]);
+    for(const g of gives)for(const o of others){
+      const a=g.reduce((s,p)=>s+val(p),0), b=val(o);
+      if(!a||!b||Math.abs(a-b)/((a+b)/2)>.15)continue;
+      const gain=tot(lineup([o],g))-base;
+      if(gain>.5)res.push({g,o,gain,a,b});
+    }
+    res.sort((x,y)=>y.gain-x.gain);
+    return `<div class="card"><h2>Trade ideas</h2><p class="muted">Deals within 15% in trade value that raise your projected weekly total. Covers 1-for-1 and 2-for-1.</p>${res.slice(0,8).map(r=>`<div class="row" style="grid-template-columns:1fr auto"><span>Give ${r.g.map(p=>esc(p.name)).join(' + ')}<br>Get ${esc(r.o.name)} <span class="muted">values ${r.a.toFixed(0)} vs ${r.b.toFixed(0)}</span></span><b>+${r.gain.toFixed(1)} pts/week</b></div>`).join('')||'<p class="muted">No fair trades found. Add other teams’ players with trade values (Settings > ESPN sync > Update trade values).</p>'}</div>`;
+  },
+  Accuracy(){
+    const a=acc(), ok=a.filter(x=>x.n>=15), ws=ok.map(x=>1/Math.max(x.mae,.1)), avg=ws.reduce((s,x)=>s+x,0)/(ws.length||1);
+    const sug=Object.fromEntries(ok.map((x,i)=>[x.s,+(ws[i]/avg).toFixed(2)]));
+    window._sug=sug;
+    return `<div class="card"><h2>Record a week’s results</h2><form class="form" id="rec"><input name="week" type="number" min="1" placeholder="Week" required style="width:90px"><textarea name="res" rows="5" placeholder="One per line: Player name, points" style="flex:1 1 300px" required></textarea><button>Save results</button></form><p class="muted">Save results before you update projections for the next week. The app compares the projections it has stored to these results.</p></div>
+    <div class="card"><h2>Source accuracy</h2>${a.map(x=>`<div class="row" style="grid-template-columns:1fr auto"><span>${esc(x.s)} <span class="muted">${x.n} player-weeks</span></span><b>off by ${x.mae.toFixed(1)} pts on average</b></div>`).join('')||'<p class="muted">No results saved yet.</p>'}
+    ${Object.keys(sug).length?`<p>Suggested weights: ${Object.entries(sug).map(([k,v])=>k+' '+v).join(', ')}</p><button id="applyw">Apply suggested weights</button>`:'<p class="muted">Weights can be suggested once a source has 15 player-weeks of results.</p>'}</div>`;
+  },
+  Settings(){
+    const s=L().slots;
+    return `<div class="card"><h2>League settings</h2><form class="form" id="set">
+      <label>Name <input name="name" value="${esc(L().name)}"></label>
+      <label>Scoring <select name="ppr">${[[0,'Standard'],[.5,'Half PPR'],[1,'Full PPR']].map(([v,t])=>`<option value="${v}" ${L().ppr==v?'selected':''}>${t}</option>`).join('')}</select></label>
+      ${Object.keys(s).map(k=>`<label>${k} <input name="s_${k}" type="number" min="0" max="6" value="${s[k]}" style="width:64px"></label>`).join('')}
+      <button>Save settings</button></form></div>
+    <div class="card"><h2>Source weights</h2><form class="form" id="wt">
+      ${Object.keys(S.weights).map(k=>`<label>${k} <input name="${k}" type="number" step=".1" min="0" value="${S.weights[k]}" style="width:72px"></label>`).join('')}
+      <button>Save weights</button></form>
+      <p class="muted">A higher weight pulls the blended number toward that source.</p></div>
+    <div class="card"><h2>ESPN sync</h2><div class="form">
+      <input data-k="worker" placeholder="Worker URL" value="${esc(S.worker||'')}" style="flex:1 1 260px">
+      <input data-k="id" placeholder="ESPN league ID" value="${esc(E().id)}" style="width:150px">
+      <input data-k="year" type="number" value="${esc(E().year)}" style="width:90px">
+      <button id="sync">Sync from ESPN</button>
+      <button class="ghost" id="vals">Update trade values</button></div>
+      <div id="sres" class="muted" style="margin-top:8px"></div></div>
+    ${S.leagues.length>1?'<button class="ghost" id="dellg">Delete this league</button>':''}`;
+  }
+};
+
+function render(){
+  $('#lg').innerHTML=S.leagues.map((l,i)=>`<option value="${i}" ${i==S.active?'selected':''}>${esc(l.name)}</option>`).join('');
+  $('#tabs').innerHTML=TABS.map(t=>`<button role="tab" aria-selected="${t==S.tab}" data-tab="${t}">${t}</button>`).join('');
+  $('#view').innerHTML=views[S.tab]();
+  save();
+}
+function calcTrade(){
+  const find=s=>s.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean).map(n=>L().players.find(p=>p.name.toLowerCase()===n));
+  const g=find($('#give').value), r=find($('#get').value), miss=[...g,...r].some(x=>!x);
+  const sum=a=>a.reduce((t,p)=>t+(p?val(p):0),0), a=sum(g), b=sum(r), d=b-a, pct=a+b?Math.abs(d)/((a+b)/2)*100:0;
+  $('#tres').innerHTML=!g.length||!r.length?'Enter players on both sides.':
+    `<span class="verdict">${pct<10?'Fair trade':d>0?'You win this trade':'You lose this trade'}</span><br>You give ${a.toFixed(0)} · You get ${b.toFixed(0)} · Difference ${d>0?'+':''}${d.toFixed(0)}${miss?'<br><span class="risk">Some names did not match a player on the Players tab.</span>':''}`;
+}
+
+const tot=l=>l.out.reduce((s,[,p])=>s+(p?blend(p).m:0),0);
+// Mean absolute error per source across saved weekly results
+function acc(){
+  const err={};
+  (L().hist||[]).forEach(h=>h.rows.forEach(r=>{for(const [s,v] of Object.entries(r.p))(err[s]=err[s]||[]).push(Math.abs(v-r.a))}));
+  return Object.entries(err).map(([s,a])=>({s,n:a.length,mae:a.reduce((x,y)=>x+y,0)/a.length}));
+}
+document.addEventListener('click',e=>{if(e.target.id==='applyw'){Object.assign(S.weights,window._sug||{});render()}});
+// Player list for autocomplete: Sleeper's free public API, cached for a day
+const DBK='fantasyhub.players'; let DB=[];
+try{const c=JSON.parse(localStorage.getItem(DBK));if(c&&Array.isArray(c.list)){DB=c.list;window._dbT=c.t||0}}catch{}
+async function loadDB(force){
+  if(!force&&DB.length&&Date.now()-(window._dbT||0)<864e5)return;
+  const r=await fetch('https://api.sleeper.app/v1/players/nfl');
+  if(!r.ok)throw new Error('Sleeper returned '+r.status);
+  const d=await r.json(), list=[];
+  for(const p of Object.values(d)){
+    if(!POS.includes(p.position)||!p.team||(p.position!=='DEF'&&!p.active))continue;
+    const n=p.full_name||`${p.first_name||''} ${p.last_name||''}`.trim();
+    if(n)list.push({n,pos:p.position,tm:p.team});
+  }
+  DB=list.sort((a,b)=>a.n.localeCompare(b.n)); window._dbT=Date.now();
+  try{localStorage.setItem(DBK,JSON.stringify({t:window._dbT,list:DB}))}catch{}
+}
+document.addEventListener('click',async e=>{
+  if(e.target.id!=='refdb')return;
+  window._dbErr=''; try{await loadDB(true)}catch(x){window._dbErr=x.message}
+  render();
+});
+document.addEventListener('input',e=>{
+  if(e.target.name!=='name'||e.target.closest('#set'))return;
+  const m=DB.find(x=>key(x.n)===key(e.target.value)), sel=$('select[name=pos]');
+  if(m&&sel)sel.value=m.pos;
+});
+// ESPN sync (talks to the Cloudflare Worker in /worker)
+const E=()=>(L().espn=L().espn||{id:'',year:new Date().getFullYear(),teamId:''});
+const sres=h=>{const n=$('#sres');if(n)n.innerHTML=h};
+const key=s=>s.toLowerCase().replace(/[^a-z0-9]/g,'');
+let pend=null;
+async function api(path){
+  if(!S.worker)throw new Error('Paste your Worker URL first.');
+  const r=await fetch(S.worker.replace(/\/$/,'')+path);
+  if(!r.ok)throw new Error(await r.text()||('Request failed ('+r.status+')'));
+  return r.json();
+}
+function applyTeam(tid){
+  const old=Object.fromEntries(L().players.map(p=>[key(p.name),p]));
+  const fresh=pend.teams.flatMap(t=>t.players.map(x=>{
+    const o=old[key(x.name)]||{};
+    return{name:x.name,pos:x.pos,mine:t.id==tid,proj:{...(o.proj||{}),...(x.pts!=null?{ESPN:x.pts}:{})},val:o.val??null};
+  }));
+  const have=new Set(fresh.map(x=>key(x.name)));
+  L().players=[...fresh,...L().players.filter(p=>p.fa&&!have.has(key(p.name)))];
+  L().ppr=pend.ppr; L().teams=pend.teams.length;
+  for(const k in L().slots)L().slots[k]=pend.slots[k]??0;
+  E().teamId=tid; render();
+  const none=!L().players.some(p=>p.proj.ESPN!=null);
+  sres('Synced '+L().players.length+' players.'+(none?' ESPN returned no projections, so enter them by hand for now.':''));
+}
+document.addEventListener('change',e=>{
+  const k=e.target.dataset.k; if(!k)return;
+  if(k==='worker')S.worker=e.target.value.trim(); else E()[k]=e.target.value.trim();
+  save();
+});
+document.addEventListener('click',async e=>{
+  const id=e.target.id;
+  try{
+    if(id==='sync'){
+      sres('Syncing…'); pend=await api(`/league?id=${encodeURIComponent(E().id)}&year=${encodeURIComponent(E().year)}`);
+      if(pend.teams.some(t=>t.id==E().teamId))return applyTeam(E().teamId);
+      sres(`Which team is yours? <select id="tm">${pend.teams.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select> <button id="usetm">Use this team</button>`);
+    }
+    if(id==='usetm')applyTeam($('#tm').value);
+    if(id==='vals'){
+      sres('Fetching trade values…');
+      const v=await api(`/values?ppr=${L().ppr}&teams=${L().teams||12}&qbs=${L().slots.QB>1?2:1}`);
+      let n=0; L().players.forEach(p=>{const x=v[key(p.name)];if(x!=null){p.val=x;n++}});
+      render(); sres('Updated trade values for '+n+' of '+L().players.length+' players.');
+    }
+  }catch(err){sres('<span class="risk">'+esc(err.message)+'</span>')}
+});
+document.addEventListener('click',e=>{
+  const t=e.target;
+  if(t.dataset.tab){S.tab=t.dataset.tab;render()}
+  if(t.dataset.del){L().players.splice(+t.dataset.del,1);render()}
+  if(t.id==='newlg'){const n=prompt('League name?');if(n){S.leagues.push(mk(n));S.active=S.leagues.length-1;render()}}
+  if(t.id==='dellg'&&confirm('Delete '+L().name+'?')){S.leagues.splice(S.active,1);S.active=0;render()}
+});
+document.addEventListener('input',e=>{if(e.target.id==='give'||e.target.id==='get')calcTrade()});
+$('#lg').addEventListener('change',e=>{S.active=+e.target.value;render()});
+document.addEventListener('submit',e=>{
+  e.preventDefault();
+  const f=new FormData(e.target), id=e.target.id;
+  if(id==='add'){
+    const proj={};
+    (f.get('proj')||'').split(',').forEach(s=>{const [k,v]=s.split(':');if(k&&isFinite(parseFloat(v)))proj[k.trim()]=parseFloat(v)});
+    L().players.push({name:f.get('name').trim(),pos:f.get('pos'),mine:f.get('where')==='mine',fa:f.get('where')==='fa',tm:(DB.find(x=>key(x.n)===key(f.get('name')))||{}).tm,proj,val:f.get('val')===''?null:+f.get('val')});
+  }
+  if(id==='rec'){
+    const wk=+f.get('week'), rows=[];
+    f.get('res').split('\n').forEach(t=>{
+      const m=t.trim().match(/^(.+?)[,:\t]\s*(-?\d+(\.\d+)?)$/); if(!m)return;
+      const p=L().players.find(p=>key(p.name)===key(m[1]));
+      if(p&&Object.keys(p.proj||{}).length)rows.push({n:p.name,a:+m[2],p:{...p.proj}});
+    });
+    L().hist=(L().hist||[]).filter(h=>h.week!==wk).concat({week:wk,rows});
+  }
+  if(id==='set'){L().name=f.get('name');L().ppr=+f.get('ppr');for(const k in L().slots)L().slots[k]=+f.get('s_'+k)}
+  if(id==='wt'){for(const k in S.weights)S.weights[k]=+f.get(k)}
+  render();
+});
+loadDB().then(()=>{if(S.tab==='Players'&&!(document.activeElement&&document.activeElement.name))render()}).catch(x=>{window._dbErr=x.message;if(S.tab==='Players')render()});
+render();
+</script>
+</body>
+</html>
